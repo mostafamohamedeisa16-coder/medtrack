@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MedTrack - مخطط المذاكرة</title>
+<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#0b6e63"><link rel="icon" href="icon-192.png"><link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#f4f6f5;--cd:#fff;--tx:#18222a;--mu:#5d6b75;--ac:#0b6e63;--ac2:#e6f2f0;--bd:#d8dfe2;--bad:#b3261e;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#11171a;--cd:#1a2227;--tx:#e6ecef;--mu:#93a2ab;--ac:#3cc4b3;--ac2:#16302d;--bd:#2c373d;--bad:#f2867f}}
+:root[data-theme="dark"]{--bg:#11171a;--cd:#1a2227;--tx:#e6ecef;--mu:#93a2ab;--ac:#3cc4b3;--ac2:#16302d;--bd:#2c373d;--bad:#f2867f}
+*{box-sizing:border-box}html,body{margin:0}
+body{font-family:Cairo,Tahoma,"Segoe UI",sans-serif;background:var(--bg);color:var(--tx);background-color:var(--bg);line-height:1.6;font-size:16px}
+main{max-width:760px;margin:0 auto;padding:12px 12px 90px}
+nav{position:sticky;top:0;display:flex;gap:6px;background:var(--bg);padding:8px 12px;max-width:760px;margin:0 auto;z-index:5}
+button,input,select,textarea{font:inherit;color:var(--tx)}
+nav button{flex:1;padding:12px 4px;border:1px solid var(--bd);background:var(--cd);border-radius:8px;cursor:pointer}
+nav button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
+.c{background:var(--cd);border:1px solid var(--bd);border-radius:10px;padding:14px;margin:10px 0}
+h2{margin:0 0 8px;font-size:1.15rem}h3{margin:0 0 6px;font-size:1rem}
+.mu{color:var(--mu);font-size:.9rem}.bad{color:var(--bad)}
+.r{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.b{padding:10px 16px;border-radius:8px;border:1px solid var(--ac);background:var(--ac);color:#fff;cursor:pointer;min-height:44px}
+.b.g{background:transparent;color:var(--ac)}.b.x{border-color:var(--bad);background:transparent;color:var(--bad)}
+input,select,textarea{padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--cd);min-height:44px;max-width:100%}
+input[type=number]{width:90px}textarea{width:100%;min-height:110px}
+.t{border-top:1px solid var(--bd);padding:10px 0}
+.big{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;direction:ltr;text-align:center}
+.pill{background:var(--ac2);color:var(--ac);border-radius:20px;padding:2px 10px;font-size:.85rem}
+</style></head><body>
+<nav id="nav"></nav><main id="m"></main>
+<script>
+const $=s=>document.querySelector(s),uid=()=>crypto.randomUUID();
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const DAYS=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+const DIFF={e:['سهل',.8],m:['متوسط',1],h:['صعب',1.3]};
+const ymd=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');
+const add=(d,n)=>{const x=new Date(d+'T12:00');x.setDate(x.getDate()+n);return ymd(x)};
+const today=()=>ymd(new Date(Date.now()-4*36e5)); // day starts 4 AM
+const dow=d=>new Date(d+'T12:00').getDay();
+// ---- storage (IndexedDB, one record) ----
+const idb=()=>new Promise((r,j)=>{const q=indexedDB.open('medtrack',1);q.onupgradeneeded=()=>q.result.createObjectStore('kv');q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)});
+const get=async k=>{const d=await idb();return new Promise(r=>{const q=d.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>r(q.result)})};
+const put=async(k,v)=>{const d=await idb();return new Promise(r=>{const t=d.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=()=>r()})};
+let S,V='today',warn='';
+const fresh=()=>({v:1,subjects:[],exams:[],topics:[],tasks:[],sessions:[],timer:null,cnt:0,lastExport:null,def:null,
+ set:{mins:[120,120,120,120,120,0,120],mpp:2,maxTask:60,focus:25,short:5,long:15,every:4}});
+const save=()=>put('state',S).catch(()=>{warn='تعذر الحفظ على هذا المتصفح'});
+// ---- scheduler (pure, deterministic) ----
+function plan(S,t){
+ const st=S.set,kept=S.tasks.filter(x=>x.status==='done'||x.pinned);
+ const pend=kept.filter(x=>x.status!=='done');
+ const ex=S.exams.filter(e=>e.date>=t).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.id<b.id?-1:1);
+ const hor=ex.length?ex[ex.length-1].date:add(t,60);
+ const days=[];for(let d=t;d<=hor;d=add(d,1))days.push(d);
+ const cap=d=>Math.min(+st.mins[dow(d)]||0,9999),used={};
+ days.forEach(d=>used[d]=0);pend.forEach(x=>{if(used[x.date]!=null)used[x.date]+=x.min});
+ const sub=id=>S.subjects.find(s=>s.id===id)||{priority:2};
+ const tops=S.topics.filter(x=>x.pages>x.done).map(x=>({x,e:ex.find(e=>e.subjectId===x.subjectId)}))
+  .sort((a,b)=>{const k=(o)=>[o.e?o.e.date:'9999',-sub(o.x.subjectId).priority,-DIFF[o.x.diff][1],o.x.name,o.x.id];
+   const A=k(a),B=k(b);for(let i=0;i<A.length;i++)if(A[i]!==B[i])return A[i]<B[i]?-1:1;return 0});
+ const out=[],def=[];let req=0;
+ for(const{x,e}of tops){
+  const per=st.mpp*DIFF[x.diff][1],mp=Math.max(0,...pend.filter(p=>p.topicId===x.id).map(p=>p.p2));
+  let cur=Math.max(x.done,mp)+1;const end=x.pages;req+=(end-cur+1)*per;
+  const last=e?add(e.date,-1):hor;
+  for(const d of days){ if(d>last||cur>end)break;
+   let rem=cap(d)-used[d];
+   while(cur<=end&&rem>=per){const n=Math.min(end-cur+1,Math.floor(Math.min(rem,st.maxTask)/per));if(n<1)break;
+    const m=Math.max(1,Math.round(n*per));
+    out.push({id:x.id+'_'+cur,topicId:x.id,date:d,p1:cur,p2:cur+n-1,min:m,type:'study',status:'todo',pinned:false});
+    rem-=m;used[d]+=m;cur+=n}}
+  if(cur<=end)def.push({topic:x.name,exam:e?e.name:'',pages:end-cur+1,min:Math.round((end-cur+1)*per)});
+ }
+ const avail=days.reduce((a,d)=>a+cap(d),0);
+ return{tasks:[...kept,...out],def:{req:Math.round(req),avail,list:def,lack:def.reduce((a,b)=>a+b.min,0)}};
+}
+function replan(){const r=plan(S,today());S.tasks=r.tasks;S.def=r.def;save();render()}
+// ---- timer (timestamps are the source of truth) ----
+const elapsed=(T,now=Date.now())=>now-T.start-T.pauses.reduce((a,p)=>a+p[1]-p[0],0)-(T.ps?now-T.ps:0);
+const fmt=ms=>{const s=Math.max(0,Math.floor(ms/1e3));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
+const tk=id=>S.tasks.find(x=>x.id===id),tp=id=>S.topics.find(x=>x.id===id),sb=id=>S.subjects.find(x=>x.id===id);
+// ---- actions ----
+const A={
+ tab(v){V=v;render()},
+ addSub(){const n=$('#sn').value.trim();if(!n)return alert('اكتب اسم المادة');S.subjects.push({id:uid(),name:n,priority:+$('#sp').value,createdAt:Date.now()});save();render()},
+ addExam(){const n=$('#en').value.trim(),s=$('#es').value,d=$('#ed').value;if(!n||!s||!d)return alert('أكمل اسم الامتحان والمادة والتاريخ');S.exams.push({id:uid(),name:n,subjectId:s,date:d});replan()},
+ addTopic(){const n=$('#tn').value.trim(),s=$('#ts').value,p=parseInt($('#tp').value);if(!n||!s||!(p>0))return alert('أكمل اسم الموضوع والمادة وعدد الصفحات (رقم أكبر من 0)');S.topics.push({id:uid(),subjectId:s,name:n,pages:p,done:0,diff:$('#td').value});replan()},
+ delExam(i){if(confirm('حذف هذا الامتحان؟')){S.exams=S.exams.filter(x=>x.id!==i);replan()}},
+ delTopic(i){if(confirm('حذف هذا الموضوع؟ تبقى سجلات الجلسات المنجزة.')){S.topics=S.topics.filter(x=>x.id!==i);S.tasks=S.tasks.filter(x=>x.topicId!==i||x.status==='done');replan()}},
+ delSub(i){if(S.topics.some(x=>x.subjectId===i)||S.exams.some(x=>x.subjectId===i))return alert('احذف مواضيع وامتحانات المادة أولا');S.subjects=S.subjects.filter(x=>x.id!==i);save();render()},
+ setPages(i){const t=tp(i),v=parseInt(prompt('الصفحات المنجزة في هذا الموضوع (من '+t.pages+')',t.done));if(!(v>=0&&v<=t.pages))return alert('رقم غير صحيح');t.done=v;replan()},
+ start(i){if(S.timer)return alert('هناك مؤقت يعمل بالفعل');S.timer={mode:'focus',taskId:i,start:Date.now(),pauses:[],ps:null,dur:S.set.focus*6e4};save();render()},
+ brk(){const long=S.cnt>0&&S.cnt%S.set.every===0;S.timer={mode:'break',start:Date.now(),pauses:[],ps:null,dur:(long?S.set.long:S.set.short)*6e4};save();render()},
+ pause(){S.timer.ps=Date.now();save();render()},
+ resume(){S.timer.pauses.push([S.timer.ps,Date.now()]);S.timer.ps=null;save();render()},
+ finish(){const T=S.timer;if(T.mode==='break'){S.timer=null;save();return render()}
+  if(T.ps)A.resume();const min=Math.round(elapsed(T)/6e4),k=tk(T.taskId),size=k?k.p2-k.p1+1:0;
+  let pg=parseInt(prompt('كم صفحة أنجزت في هذه الجلسة؟ (0 إذا لا شيء)',0));if(!(pg>=0&&pg<=size))pg=0;
+  const notes=prompt('ملاحظات (اختياري)')||'';
+  S.sessions.push({id:uid(),taskId:T.taskId,startedAt:T.start,endedAt:Date.now(),pausedIntervals:T.pauses,actualMinutes:min,completedPages:pg,notes});
+  S.cnt++;S.timer=null;save();render()},
+ done(i){const k=tk(i),size=k.p2-k.p1+1,t=tp(k.topicId);
+  const v=parseInt(prompt('كم صفحة أنجزت فعلا من '+size+'؟',size));if(!(v>=0&&v<=size))return alert('رقم غير صحيح');
+  if(v===0)return alert('لم يتم تسجيل أي صفحات. استخدم "تأجيل" إن لم تذاكر.');
+  k.status='done';k.donePages=v;k.doneDate=today();k.actualMinutes=S.sessions.filter(s=>s.taskId===i).reduce((a,s)=>a+s.actualMinutes,0);
+  t.done=Math.min(t.pages,t.done+v);if(v<size)alert('سُجّلت '+v+' صفحة، وسيُعاد جدولة الباقي ('+(size-v)+' صفحة).');replan()},
+ pin(i){const k=tk(i);k.pinned=!k.pinned;replan()},
+ post(i){const k=tk(i);k.date=add(k.date<today()?today():k.date,1);k.pinned=true;replan()},
+ replan(){replan()},
+ saveSet(){const s=S.set;s.mins=[0,1,2,3,4,5,6].map(i=>Math.max(0,parseInt($('#w'+i).value)||0));
+  const n=(id,d,a,b)=>{const v=parseFloat($(id).value);return v>=a&&v<=b?v:d};
+  s.mpp=n('#mpp',2,.1,60);s.maxTask=n('#mt',60,10,240);s.focus=n('#fo',25,1,180);s.short=n('#sh',5,1,60);s.long=n('#lo',15,1,90);s.every=n('#ev',4,2,10);replan()},
+ preset(a){S.set.focus=a[0];S.set.short=a[1];save();render()},
+ exp(){S.lastExport=Date.now();save();$('#bk').value=JSON.stringify({app:'medtrack',v:1,data:S},null,1);$('#bk').select()},
+ imp(){let o;try{o=JSON.parse($('#bk').value)}catch(e){return alert('النص ليس نسخة احتياطية صالحة (JSON)')}
+  if(!o||o.app!=='medtrack'||o.v!==1||!o.data)return alert('ملف غير مدعوم أو نسخته غير معروفة');
+  const d=o.data;for(const k of['subjects','exams','topics','tasks','sessions'])if(!Array.isArray(d[k]))return alert('بيانات ناقصة: '+k);
+  for(const k of['subjects','exams','topics','tasks','sessions']){const ids=d[k].map(x=>x.id);if(new Set(ids).size!==ids.length)return alert('معرّفات مكررة في: '+k)}
+  if(!confirm('سيتم استبدال كل بياناتك الحالية بالنسخة الاحتياطية. سيُحفظ نسخة من بياناتك الحالية تلقائيا قبل ذلك. متابعة؟'))return;
+  put('prev',S).then(()=>{S={...fresh(),...d,set:{...fresh().set,...d.set},timer:null};replan()})},
+ undo(){get('prev').then(p=>{if(!p)return alert('لا توجد نسخة سابقة');if(confirm('الرجوع إلى البيانات قبل آخر استعادة؟')){S=p;replan()}})}
+};
+document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b)A[b.dataset.a](b.dataset.id||undefined)});
+// ---- views ----
+const opts=l=>l.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');
+function vToday(){
+ const t=today(),ex=S.exams.filter(e=>e.date>=t).sort((a,b)=>a.date<b.date?-1:1)[0];
+ const todo=S.tasks.filter(x=>x.status!=='done'&&x.date<=t).sort((a,b)=>a.date<b.date?-1:a.id<b.id?-1:1);
+ const dn=S.tasks.filter(x=>x.status==='done'&&x.doneDate===t);
+ const pm=todo.reduce((a,x)=>a+x.min,0),dm=dn.reduce((a,x)=>a+(x.actualMinutes||x.min),0);
+ const row=(k,d)=>{const p=tp(k.topicId);return`<div class="t"><b>${esc(p?sb(p.subjectId)?.name:'')}</b> - ${esc(p?.name||'موضوع محذوف')}
+  <div class="mu">صفحات ${k.p1}-${k.p2} · ${k.min} دقيقة · دراسة · ${d?'منجزة ('+k.donePages+' صفحة)':k.date<t?'<span class=bad>متأخرة</span>':'اليوم'}${k.pinned?' · <span class=pill>مثبتة</span>':''}</div>
+  ${d?'':`<div class="r"><button class="b" data-a="start" data-id="${k.id}">ابدأ</button><button class="b g" data-a="done" data-id="${k.id}">أنجزت</button><button class="b g" data-a="post" data-id="${k.id}">تأجيل</button><button class="b g" data-a="pin" data-id="${k.id}">${k.pinned?'إلغاء التثبيت':'تثبيت'}</button></div>`}</div>`};
+ return`<div class="c"><h2>اليوم ${t}</h2>
+  <div>${ex?`أقرب امتحان: <b>${esc(ex.name)}</b> بعد <b>${Math.round((new Date(ex.date)-new Date(t))/864e5)}</b> يوم`:'لا توجد امتحانات قادمة. أضف امتحانا من تبويب المواد.'}</div>
+  <div class="mu">المخطط اليوم: ${pm} دقيقة · المنجز: ${dm} دقيقة · المتبقي: ${todo.length} مهمة</div></div>
+ ${vTimer()}${vDef()}
+ <div class="c"><h2>مهام اليوم</h2>${todo.map(k=>row(k)).join('')||'<div class="mu">لا توجد مهام. أضف مواضيع وامتحانات ثم اضغط "أعد الجدولة".</div>'}
+  ${dn.map(k=>row(k,1)).join('')}
+  <div class="r" style="margin-top:10px"><button class="b g" data-a="replan">أعد الجدولة</button></div></div>`}
+function vTimer(){const T=S.timer;
+ if(!T)return`<div class="c r"><button class="b g" data-a="brk">ابدأ استراحة</button><span class="mu">جلسات مكتملة: ${S.cnt}</span></div>`;
+ const k=T.taskId&&tk(T.taskId),p=k&&tp(k.topicId);
+ return`<div class="c"><h2>${T.mode==='focus'?'تركيز: '+esc(p?.name||''):'استراحة'}</h2>
+ <div class="big" id="rem"></div><div class="mu" style="text-align:center">المنقضي <span id="el"></span>${T.ps?' · متوقف مؤقتا':''}</div>
+ <div class="r" style="justify-content:center;margin-top:8px">${T.ps?'<button class="b" data-a="resume">استئناف</button>':'<button class="b" data-a="pause">إيقاف مؤقت</button>'}<button class="b g" data-a="finish">${T.mode==='focus'?'إنهاء الجلسة':'إنهاء الاستراحة'}</button></div></div>`}
+function vDef(){const d=S.def;if(!d)return'';
+ if(d.list.length)return`<div class="c" style="border-color:var(--bad)"><h2 class="bad">الوقت لا يكفي</h2>
+  <div>المطلوب: ${d.req} دقيقة · المتاح: ${d.avail} دقيقة · العجز: <b>${d.lack}</b> دقيقة (${(d.lack/60).toFixed(1)} ساعة)</div>
+  ${d.list.map(x=>`<div class="t">${esc(x.topic)}: ${x.pages} صفحة لا تتسع${x.exam?' قبل '+esc(x.exam):''}</div>`).join('')}
+  <div class="mu">الحلول: زد دقائق الأيام، أو أعد النظر في الأولويات، أو استبعد مواضيع بنفسك. لم يُحذف أي شيء تلقائيا.</div></div>`;
+ return d.req?`<div class="c"><span class="pill">الجدول ممكن</span> <span class="mu">المطلوب ${d.req} دقيقة من ${d.avail} متاحة</span></div>`:''}
+function vSub(){
+ return`<div class="c"><h2>مادة جديدة</h2><div class="r"><input id="sn" placeholder="اسم المادة"><select id="sp"><option value="3">أولوية عالية</option><option value="2" selected>متوسطة</option><option value="1">منخفضة</option></select><button class="b" data-a="addSub">إضافة</button></div></div>
+ <div class="c"><h2>امتحان جديد</h2><div class="r"><input id="en" placeholder="اسم الامتحان"><select id="es">${opts(S.subjects)}</select><input id="ed" type="date"><button class="b" data-a="addExam">إضافة</button></div>
+  ${S.exams.slice().sort((a,b)=>a.date<b.date?-1:1).map(e=>`<div class="t r">${esc(e.name)} · ${esc(sb(e.subjectId)?.name)} · ${e.date}<button class="b x" data-a="delExam" data-id="${e.id}">حذف</button></div>`).join('')}</div>
+ <div class="c"><h2>موضوع جديد (بالصفحات)</h2><div class="r"><input id="tn" placeholder="اسم الموضوع"><select id="ts">${opts(S.subjects)}</select><input id="tp" type="number" min="1" placeholder="صفحات"><select id="td"><option value="e">سهل</option><option value="m" selected>متوسط</option><option value="h">صعب</option></select><button class="b" data-a="addTopic">إضافة</button></div></div>
+ ${S.subjects.map(s=>`<div class="c"><div class="r"><h2 style="margin:0;flex:1">${esc(s.name)}</h2><button class="b x" data-a="delSub" data-id="${s.id}">حذف المادة</button></div>
+  ${S.topics.filter(x=>x.subjectId===s.id).map(x=>`<div class="t">${esc(x.name)} <span class="pill">${DIFF[x.diff][0]}</span><div class="mu">${x.done} / ${x.pages} صفحة (${Math.round(100*x.done/x.pages)}%)</div><div class="r"><button class="b g" data-a="setPages" data-id="${x.id}">تعديل المنجز</button><button class="b x" data-a="delTopic" data-id="${x.id}">حذف</button></div></div>`).join('')||'<div class="mu">لا مواضيع بعد</div>'}</div>`).join('')}`}
+function vSet(){const s=S.set,n=(id,v,l)=>`<label class="r">${l} <input id="${id}" type="number" step="any" value="${v}"></label>`;
+ const old=!S.lastExport||Date.now()-S.lastExport>7*864e5;
+ return`<div class="c"><h2>وقت المذاكرة المتاح (دقائق لكل يوم)</h2><div class="mu">ضع 0 ليوم الراحة</div>${DAYS.map((d,i)=>n('w'+i,s.mins[i],d)).join('')}
+ ${n('mpp',s.mpp,'دقائق لكل صفحة')}${n('mt',s.maxTask,'أقصى مدة للمهمة (دقيقة)')}</div>
+ <div class="c"><h2>بومودورو</h2> <div class="r"><button class="b g" onclick="A.preset([25,5])">25/5</button><button class="b g" onclick="A.preset([45,10])">45/10</button><button class="b g" onclick="A.preset([60,15])">60/15</button></div>
+ ${n('fo',s.focus,'مدة التركيز')}${n('sh',s.short,'استراحة قصيرة')}${n('lo',s.long,'استراحة طويلة')}${n('ev',s.every,'جلسات قبل الطويلة')}
+ <div class="r" style="margin-top:8px"><button class="b" data-a="saveSet">حفظ الإعدادات وإعادة الجدولة</button></div></div>
+ <div class="c"><h2>النسخ الاحتياطي</h2>${old?'<div class="bad">لم تأخذ نسخة احتياطية منذ أكثر من أسبوع.</div>':''}
+ <div class="mu">اضغط "تصدير" ثم انسخ النص كله واحفظه في ملاحظات أو أرسله لنفسك. للاستعادة الصق النص هنا واضغط "استعادة".</div>
+ <textarea id="bk" dir="ltr"></textarea><div class="r"><button class="b" data-a="exp">تصدير</button><button class="b g" data-a="imp">استعادة</button><button class="b g" data-a="undo">تراجع عن آخر استعادة</button></div></div>`}
+function render(){
+ $('#nav').innerHTML=[['today','اليوم'],['sub','المواد والامتحانات'],['set','الإعدادات']].map(([k,l])=>`<button class="${V===k?'on':''}" data-a="tab" data-id="${k}">${l}</button>`).join('');
+ $('#m').innerHTML=(warn?`<div class="c bad">${warn}</div>`:'')+(V==='today'?vToday():V==='sub'?vSub():vSet());tick()}
+function tick(){const T=S&&S.timer;if(!T||!$('#rem'))return;const e=elapsed(T);$('#rem').textContent=fmt(T.dur-e);$('#el').textContent=fmt(e)}
+setInterval(tick,1000);document.addEventListener('visibilitychange',tick);
+(async()=>{try{S=await get('state')}catch(e){warn='التخزين غير متاح، ستضيع البيانات عند الإغلاق'}
+ S=S||fresh();try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}replan()})();
+if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+</script></body></html>
