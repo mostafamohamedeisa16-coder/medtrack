@@ -16,15 +16,19 @@ nav button{flex:1;padding:12px 4px;border:1px solid var(--bd);background:var(--c
 nav button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
 .c{background:var(--cd);border:1px solid var(--bd);border-radius:10px;padding:14px;margin:10px 0}
 h2{margin:0 0 8px;font-size:1.15rem}h3{margin:0 0 6px;font-size:1rem}
-.mu{color:var(--mu);font-size:.9rem}.bad{color:var(--bad)}
+.mu{color:var(--mu);font-size:.9rem}.bad{color:var(--bad)}.ok{color:var(--ac)}
 .r{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .b{padding:10px 16px;border-radius:8px;border:1px solid var(--ac);background:var(--ac);color:#fff;cursor:pointer;min-height:44px}
 .b.g{background:transparent;color:var(--ac)}.b.x{border-color:var(--bad);background:transparent;color:var(--bad)}
 input,select,textarea{padding:10px;border:1px solid var(--bd);border-radius:8px;background:var(--cd);min-height:44px;max-width:100%}
 input[type=number]{width:90px}textarea{width:100%;min-height:110px}
+input[type=radio],input[type=checkbox]{min-height:auto;width:22px;height:22px}
 .t{border-top:1px solid var(--bd);padding:10px 0}
 .big{font-size:2.6rem;font-weight:700;font-variant-numeric:tabular-nums;direction:ltr;text-align:center}
 .pill{background:var(--ac2);color:var(--ac);border-radius:20px;padding:2px 10px;font-size:.85rem}
+.bar{height:8px;background:var(--ac2);border-radius:6px;overflow:hidden}.bar i{display:block;height:100%;background:var(--ac)}
+.opt{display:flex;gap:8px;align-items:center;padding:6px 0}
+pre{direction:ltr;text-align:left;white-space:pre-wrap;background:var(--ac2);padding:8px;border-radius:8px;font-size:.8rem;overflow:auto}
 </style></head><body>
 <nav id="nav"></nav><main id="m"></main>
 <script>
@@ -36,17 +40,23 @@ const ymd=x=>x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+Stri
 const add=(d,n)=>{const x=new Date(d+'T12:00');x.setDate(x.getDate()+n);return ymd(x)};
 const today=()=>ymd(new Date(Date.now()-4*36e5)); // day starts 4 AM
 const dow=d=>new Date(d+'T12:00').getDay();
+const D=d=>'<bdi dir="ltr">'+d+'</bdi>';
+const nz=s=>String(s).trim().replace(/\s+/g,' ').toLowerCase();
 // ---- storage (IndexedDB, one record) ----
 const idb=()=>new Promise((r,j)=>{const q=indexedDB.open('medtrack',1);q.onupgradeneeded=()=>q.result.createObjectStore('kv');q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)});
 const get=async k=>{const d=await idb();return new Promise(r=>{const q=d.transaction('kv').objectStore('kv').get(k);q.onsuccess=()=>r(q.result)})};
 const put=async(k,v)=>{const d=await idb();return new Promise(r=>{const t=d.transaction('kv','readwrite');t.objectStore('kv').put(v,k);t.oncomplete=()=>r()})};
-let S,V='today',warn='';
-const fresh=()=>({v:1,subjects:[],exams:[],topics:[],tasks:[],sessions:[],timer:null,cnt:0,lastExport:null,def:null,
- set:{mins:[120,120,120,120,120,0,120],mpp:2,maxTask:60,focus:25,short:5,long:15,every:4}});
+let S,V='today',warn='',P=null,Q=null,QP=null,QJ='';
+const fresh=()=>({v:2,subjects:[],exams:[],topics:[],tasks:[],sessions:[],books:[],questions:[],attempts:[],timer:null,cnt:0,lastExport:null,def:null,qpost:null,
+ set:{mins:[120,120,120,120,120,0,120],mpp:2,maxTask:60,focus:25,short:5,long:15,every:4,auto:false,sound:true,revOn:true,rev:[1,3,7,14,30]}});
+// fills in any field an older saved version does not have (never removes data)
+function mig(s){const f=fresh();for(const k of Object.keys(f))if(s[k]===undefined)s[k]=f[k];s.set={...f.set,...s.set};
+ s.topics.forEach(t=>{t.ex=!!t.ex;t.off=t.off||0});s.v=2;return s}
 const save=()=>put('state',S).catch(()=>{warn='تعذر الحفظ على هذا المتصفح'});
 // ---- scheduler (pure, deterministic) ----
-function plan(S,t){
- const st=S.set,kept=S.tasks.filter(x=>x.status==='done'||x.pinned);
+// roll=true: overdue tasks are re-planned (used only by "I am behind" after confirmation). Otherwise they are kept as they are.
+function plan(S,t,roll){
+ const st=S.set,kept=S.tasks.filter(x=>x.status==='done'||x.pinned||(!roll&&x.date<t));
  const pend=kept.filter(x=>x.status!=='done');
  const ex=S.exams.filter(e=>e.date>=t).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.id<b.id?-1:1);
  const hor=ex.length?ex[ex.length-1].date:add(t,60);
@@ -54,12 +64,23 @@ function plan(S,t){
  const cap=d=>Math.min(+st.mins[dow(d)]||0,9999),used={};
  days.forEach(d=>used[d]=0);pend.forEach(x=>{if(used[x.date]!=null)used[x.date]+=x.min});
  const sub=id=>S.subjects.find(s=>s.id===id)||{priority:2};
- const tops=S.topics.filter(x=>x.pages>x.done).map(x=>({x,e:ex.find(e=>e.subjectId===x.subjectId)}))
+ const exOf=x=>ex.find(e=>e.subjectId===x.subjectId);
+ const out=[],def=[],rdef=[];
+ // revisions of completed topics (fixed ids => never duplicated)
+ if(st.revOn){const have=new Set(kept.map(x=>x.id));
+  for(const x of S.topics.filter(x=>!x.ex&&x.pages>0&&x.done>=x.pages&&x.doneDate).sort((a,b)=>a.id<b.id?-1:1)){
+   const e=exOf(x),last=e?add(e.date,-1):hor,m=Math.min(st.maxTask,Math.max(5,Math.round(x.pages*st.mpp*.25)));
+   for(const n of st.rev){const id='rev_'+x.id+'_'+n;if(have.has(id))continue;
+    let from=add(x.doneDate,n);if(from<t)from=t;let ok=false;
+    for(const d of days){if(d<from)continue;if(d>last)break;
+     if(cap(d)-used[d]>=m){out.push({id,topicId:x.id,date:d,p1:1,p2:x.pages,min:m,type:'rev',status:'todo',pinned:false});used[d]+=m;ok=true;break}}
+    if(!ok)rdef.push({topic:x.name,n})}}}
+ const tops=S.topics.filter(x=>x.pages>x.done&&!x.ex).map(x=>({x,e:exOf(x)}))
   .sort((a,b)=>{const k=(o)=>[o.e?o.e.date:'9999',-sub(o.x.subjectId).priority,-DIFF[o.x.diff][1],o.x.name,o.x.id];
    const A=k(a),B=k(b);for(let i=0;i<A.length;i++)if(A[i]!==B[i])return A[i]<B[i]?-1:1;return 0});
- const out=[],def=[];let req=0;
+ let req=0;
  for(const{x,e}of tops){
-  const per=st.mpp*DIFF[x.diff][1],mp=Math.max(0,...pend.filter(p=>p.topicId===x.id).map(p=>p.p2));
+  const per=st.mpp*DIFF[x.diff][1],mp=Math.max(0,...pend.filter(p=>p.topicId===x.id&&p.type!=='rev').map(p=>p.p2));
   let cur=Math.max(x.done,mp)+1;const end=x.pages;req+=(end-cur+1)*per;
   const last=e?add(e.date,-1):hor;
   for(const d of days){ if(d>last||cur>end)break;
@@ -71,107 +92,245 @@ function plan(S,t){
   if(cur<=end)def.push({topic:x.name,exam:e?e.name:'',pages:end-cur+1,min:Math.round((end-cur+1)*per)});
  }
  const avail=days.reduce((a,d)=>a+cap(d),0);
- return{tasks:[...kept,...out],def:{req:Math.round(req),avail,list:def,lack:def.reduce((a,b)=>a+b.min,0)}};
+ return{tasks:[...kept,...out],def:{req:Math.round(req),avail,list:def,rev:rdef,lack:def.reduce((a,b)=>a+b.min,0)}};
 }
-function replan(){const r=plan(S,today());S.tasks=r.tasks;S.def=r.def;save();render()}
+// what would change between the current plan and a proposed one (study tasks only)
+function diffTasks(oldT,newT,reason,t){
+ const o=oldT.filter(x=>x.status!=='done'&&x.type!=='rev'),n=newT.filter(x=>x.status!=='done'&&x.type!=='rev'),rows=[];
+ const ov=(a,b)=>a.topicId===b.topicId&&a.p1<=b.p2&&a.p2>=b.p1;
+ for(const k of o){const m=n.filter(x=>ov(x,k));
+  if(!m.length){rows.push({k,txt:'لا تتسع في الجدول الجديد (عجز وقت)',bad:1,why:k.date<t?'متأخرة منذ '+D(k.date):reason});continue}
+  const ds=[...new Set(m.map(x=>x.date))].sort();
+  if(ds.length===1&&ds[0]===k.date)continue;
+  rows.push({k,txt:'تنتقل إلى '+ds.map(D).join(' و '),why:k.date<t?'متأخرة منذ '+D(k.date):reason})}
+ return{rows,fresh:n.filter(x=>!o.some(k=>ov(x,k))).length};
+}
+function replan(roll){const r=plan(S,today(),roll);S.tasks=r.tasks;S.def=r.def;save();render()}
+function propose(title,mut,roll,reason){const C=JSON.parse(JSON.stringify(S));mut(C);const t=today(),r=plan(C,t,roll);
+ P={title,mut,roll,reason,r,d:diffTasks(S.tasks,r.tasks,reason,t)};V='prop';render()}
 // ---- timer (timestamps are the source of truth) ----
 const elapsed=(T,now=Date.now())=>now-T.start-T.pauses.reduce((a,p)=>a+p[1]-p[0],0)-(T.ps?now-T.ps:0);
 const fmt=ms=>{const s=Math.max(0,Math.floor(ms/1e3));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
 const tk=id=>S.tasks.find(x=>x.id===id),tp=id=>S.topics.find(x=>x.id===id),sb=id=>S.subjects.find(x=>x.id===id);
+function beep(){if(!S.set.sound)return;try{const a=new (window.AudioContext||window.webkitAudioContext)();[0,.35,.7].forEach(d=>{const o=a.createOscillator(),g=a.createGain();o.frequency.value=880;g.gain.value=.2;o.connect(g);g.connect(a.destination);o.start(a.currentTime+d);o.stop(a.currentTime+d+.2)});navigator.vibrate&&navigator.vibrate([200,100,200])}catch(e){}}
+// ---- quiz (pure helpers) ----
+function pickQ(S,topicIds,n=5){const last={};S.attempts.forEach(a=>{if(!last[a.questionId]||a.attemptDate>last[a.questionId])last[a.questionId]=a.attemptDate});
+ return S.questions.filter(q=>!q.del&&topicIds.has(q.topicId)).sort((a,b)=>{const x=last[a.id]||'',y=last[b.id]||'';return x<y?-1:x>y?1:a.id<b.id?-1:1}).slice(0,n)}
+function validateQ(raw,topics,existing){const ok=[],errs=[];let dup=0;
+ if(!Array.isArray(raw))return{ok,errs:['يجب أن يكون المحتوى قائمة [ ] من الأسئلة'],dup};
+ const seen=new Set(existing.filter(q=>!q.del).map(q=>q.topicId+'|'+nz(q.text)));
+ raw.forEach((r,i)=>{const L='سؤال '+(i+1)+': ';
+  if(!r||typeof r!=='object'||Array.isArray(r)){errs.push(L+'ليس سؤالا صالحا');return}
+  const t=topics.find(x=>nz(x.name)===nz(r.topic||''));
+  if(!t){errs.push(L+'الموضوع "'+r.topic+'" غير موجود. أضفه أولا بنفس الاسم');return}
+  const type=r.type==='mcq'||r.type==='tf'?r.type:null;if(!type){errs.push(L+'النوع يجب أن يكون mcq أو tf');return}
+  const text=String(r.question||'').trim();if(!text){errs.push(L+'نص السؤال فارغ');return}
+  let opts,ans;
+  if(type==='mcq'){
+   if(!Array.isArray(r.options)||r.options.length<2||r.options.length>8||r.options.some(o=>typeof o!=='string'||!o.trim())){errs.push(L+'الخيارات يجب أن تكون من 2 إلى 8 نصوص غير فارغة');return}
+   opts=r.options.map(o=>o.trim());
+   if(!Number.isInteger(r.answer)||r.answer<0||r.answer>=opts.length){errs.push(L+'رقم الإجابة غير صحيح (يبدأ العد من 0 وأكبر قيمة هنا '+(opts.length-1)+')');return}
+   ans=r.answer}
+  else{if(typeof r.answer!=='boolean'){errs.push(L+'إجابة صح/خطأ يجب أن تكون true أو false');return}opts=['صح','خطأ'];ans=r.answer?0:1}
+  const k=t.id+'|'+nz(text);if(seen.has(k)){dup++;return}seen.add(k);
+  ok.push({id:uid(),topicId:t.id,type,text,options:opts,answer:ans,explanation:String(r.explanation||'').trim(),createdAt:Date.now()})});
+ return{ok,errs,dup}}
+function studiedToday(){const t=today(),ids=new Set();
+ S.tasks.filter(x=>x.status==='done'&&x.doneDate===t).forEach(x=>ids.add(x.topicId));
+ S.sessions.forEach(s=>{if(ymd(new Date(s.startedAt-4*36e5))===t){const id=s.topicId||tk(s.taskId)?.topicId;if(id)ids.add(id)}});return ids}
 // ---- actions ----
 const A={
- tab(v){V=v;render()},
+ tab(v){V=v;P=null;render()},
  addSub(){const n=$('#sn').value.trim();if(!n)return alert('اكتب اسم المادة');S.subjects.push({id:uid(),name:n,priority:+$('#sp').value,createdAt:Date.now()});save();render()},
  addExam(){const n=$('#en').value.trim(),s=$('#es').value,d=$('#ed').value;if(!n||!s||!d)return alert('أكمل اسم الامتحان والمادة والتاريخ');S.exams.push({id:uid(),name:n,subjectId:s,date:d});replan()},
- addTopic(){const n=$('#tn').value.trim(),s=$('#ts').value,p=parseInt($('#tp').value);if(!n||!s||!(p>0))return alert('أكمل اسم الموضوع والمادة وعدد الصفحات (رقم أكبر من 0)');S.topics.push({id:uid(),subjectId:s,name:n,pages:p,done:0,diff:$('#td').value});replan()},
+ editExam(i){const e=S.exams.find(x=>x.id===i),v=(prompt('التاريخ الجديد للامتحان بصيغة 2026-12-31',e.date)||'').trim();
+  if(!v||v===e.date)return;if(!/^\d{4}-\d{2}-\d{2}$/.test(v)||isNaN(new Date(v+'T12:00')))return alert('تاريخ غير صحيح. مثال: 2026-12-31');
+  propose('تغيير موعد الامتحان: '+e.name,s=>{s.exams.find(x=>x.id===i).date=v},false,'تغيّر موعد الامتحان')},
+ addBook(){const n=$('#bn').value.trim(),s=$('#bs').value,p=parseInt($('#bp').value);if(!n||!s||!(p>0))return alert('أكمل اسم الكتاب والمادة وعدد صفحاته');S.books.push({id:uid(),subjectId:s,title:n,pages:p,createdAt:Date.now()});save();render()},
+ delBook(i){if(confirm('حذف الكتاب؟ تبقى المواضيع وتقدمك كما هي.')){S.books.find(b=>b.id===i).del=true;save();render()}},
+ addTopic(){const n=$('#tn').value.trim(),s=$('#ts').value,bid=$('#tb').value||null;let p=parseInt($('#tp').value),off=0;
+  if(bid){const b=S.books.find(x=>x.id===bid),a=parseInt($('#t1').value),z=parseInt($('#t2').value);
+   if(!(a>=1&&z>=a&&z<=b.pages))return alert('مدى الصفحات غير صحيح. الكتاب فيه '+b.pages+' صفحة');p=z-a+1;off=a-1}
+  if(!n||!s||!(p>0))return alert('أكمل اسم الموضوع والمادة وعدد الصفحات (رقم أكبر من 0)');
+  S.topics.push({id:uid(),subjectId:s,name:n,pages:p,done:0,diff:$('#td').value,ex:false,off,bookId:bid});replan()},
  delExam(i){if(confirm('حذف هذا الامتحان؟')){S.exams=S.exams.filter(x=>x.id!==i);replan()}},
  delTopic(i){if(confirm('حذف هذا الموضوع؟ تبقى سجلات الجلسات المنجزة.')){S.topics=S.topics.filter(x=>x.id!==i);S.tasks=S.tasks.filter(x=>x.topicId!==i||x.status==='done');replan()}},
  delSub(i){if(S.topics.some(x=>x.subjectId===i)||S.exams.some(x=>x.subjectId===i))return alert('احذف مواضيع وامتحانات المادة أولا');S.subjects=S.subjects.filter(x=>x.id!==i);save();render()},
- setPages(i){const t=tp(i),v=parseInt(prompt('الصفحات المنجزة في هذا الموضوع (من '+t.pages+')',t.done));if(!(v>=0&&v<=t.pages))return alert('رقم غير صحيح');t.done=v;replan()},
+ excl(i){const t=tp(i);if(!t.ex&&!confirm('استبعاد هذا الموضوع من الجدول؟ يمكنك إعادته لاحقا ولن يُحذف شيء.'))return;t.ex=!t.ex;replan()},
+ setPages(i){const t=tp(i),v=parseInt(prompt('الصفحات المنجزة في هذا الموضوع (من '+t.pages+')',t.done));if(!(v>=0&&v<=t.pages))return alert('رقم غير صحيح');t.done=v;if(v>=t.pages){t.doneDate=t.doneDate||today()}else delete t.doneDate;replan()},
  start(i){if(S.timer)return alert('هناك مؤقت يعمل بالفعل');S.timer={mode:'focus',taskId:i,start:Date.now(),pauses:[],ps:null,dur:S.set.focus*6e4};save();render()},
  brk(){const long=S.cnt>0&&S.cnt%S.set.every===0;S.timer={mode:'break',start:Date.now(),pauses:[],ps:null,dur:(long?S.set.long:S.set.short)*6e4};save();render()},
  pause(){S.timer.ps=Date.now();save();render()},
  resume(){S.timer.pauses.push([S.timer.ps,Date.now()]);S.timer.ps=null;save();render()},
  finish(){const T=S.timer;if(T.mode==='break'){S.timer=null;save();return render()}
-  if(T.ps)A.resume();const min=Math.round(elapsed(T)/6e4),k=tk(T.taskId),size=k?k.p2-k.p1+1:0;
-  let pg=parseInt(prompt('كم صفحة أنجزت في هذه الجلسة؟ (0 إذا لا شيء)',0));if(!(pg>=0&&pg<=size))pg=0;
+  if(T.ps)A.resume();const min=Math.round(elapsed(T)/6e4),k=tk(T.taskId),size=k&&k.type!=='rev'?k.p2-k.p1+1:0;
+  let pg=0;if(size){pg=parseInt(prompt('كم صفحة أنجزت في هذه الجلسة؟ (0 إذا لا شيء)',0));if(!(pg>=0&&pg<=size)){alert('رقم غير صحيح، سُجّل 0 صفحة. يمكنك تسجيل الصفحات عند الضغط على "أنجزت".');pg=0}}
   const notes=prompt('ملاحظات (اختياري)')||'';
-  S.sessions.push({id:uid(),taskId:T.taskId,startedAt:T.start,endedAt:Date.now(),pausedIntervals:T.pauses,actualMinutes:min,completedPages:pg,notes});
-  S.cnt++;S.timer=null;save();render()},
- done(i){const k=tk(i),size=k.p2-k.p1+1,t=tp(k.topicId);
-  const v=parseInt(prompt('كم صفحة أنجزت فعلا من '+size+'؟',size));if(!(v>=0&&v<=size))return alert('رقم غير صحيح');
+  S.sessions.push({id:uid(),taskId:T.taskId,topicId:k?k.topicId:null,startedAt:T.start,endedAt:Date.now(),pausedIntervals:T.pauses,actualMinutes:min,completedPages:pg,notes});
+  S.cnt++;S.timer=null;save();S.set.auto?A.brk():render()},
+ done(i){const k=tk(i),t=tp(k.topicId);
+  if(k.type==='rev'){if(!confirm('تأكيد إنجاز هذه المراجعة؟'))return;k.status='done';k.donePages=0;k.doneDate=today();k.actualMinutes=S.sessions.filter(s=>s.taskId===i).reduce((a,s)=>a+s.actualMinutes,0);return replan()}
+  const size=k.p2-k.p1+1,v=parseInt(prompt('كم صفحة أنجزت فعلا من '+size+'؟',size));if(!(v>=0&&v<=size))return alert('رقم غير صحيح');
   if(v===0)return alert('لم يتم تسجيل أي صفحات. استخدم "تأجيل" إن لم تذاكر.');
   k.status='done';k.donePages=v;k.doneDate=today();k.actualMinutes=S.sessions.filter(s=>s.taskId===i).reduce((a,s)=>a+s.actualMinutes,0);
-  t.done=Math.min(t.pages,t.done+v);if(v<size)alert('سُجّلت '+v+' صفحة، وسيُعاد جدولة الباقي ('+(size-v)+' صفحة).');replan()},
+  if(v<size){k.plannedP2=k.p2;k.p2=k.p1+v-1}  // the finished task records the pages really done
+  t.done=Math.min(t.pages,t.done+v);if(t.done>=t.pages)t.doneDate=today();
+  if(v<size)alert('سُجّلت '+v+' صفحة، وسيُعاد جدولة الباقي ('+(size-v)+' صفحة).');replan()},
  pin(i){const k=tk(i);k.pinned=!k.pinned;replan()},
- post(i){const k=tk(i);k.date=add(k.date<today()?today():k.date,1);k.pinned=true;replan()},
+ post(i){const k=tk(i);k.date=add(k.date<today()?today():k.date,1);k.pinned=true;k.postponed=(k.postponed||0)+1;replan()},
  replan(){replan()},
+ behind(){const t=today();if(!S.tasks.some(x=>x.status!=='done'&&x.date<t))return alert('لا توجد مهام متأخرة.');
+  propose('أنا متأخر: إعادة توزيع المهام المتأخرة',()=>{},true,'أُعيد توزيعها لتتسع الأيام القادمة')},
+ applyP(){const p=P;P=null;V='today';p.mut(S);replan(p.roll)},
+ cancelP(){P=null;V='today';render()},
  saveSet(){const s=S.set;s.mins=[0,1,2,3,4,5,6].map(i=>Math.max(0,parseInt($('#w'+i).value)||0));
   const n=(id,d,a,b)=>{const v=parseFloat($(id).value);return v>=a&&v<=b?v:d};
-  s.mpp=n('#mpp',2,.1,60);s.maxTask=n('#mt',60,10,240);s.focus=n('#fo',25,1,180);s.short=n('#sh',5,1,60);s.long=n('#lo',15,1,90);s.every=n('#ev',4,2,10);replan()},
+  s.mpp=n('#mpp',2,.1,60);s.maxTask=n('#mt',60,10,240);s.focus=n('#fo',25,1,180);s.short=n('#sh',5,1,60);s.long=n('#lo',15,1,90);s.every=n('#ev',4,2,10);
+  s.auto=$('#au').checked;s.sound=$('#so').checked;s.revOn=$('#ro').checked;
+  const rv=[...new Set($('#rv').value.split(/[,\s،]+/).map(x=>parseInt(x)).filter(x=>x>=1&&x<=365))].sort((a,b)=>a-b);
+  if(rv.length)s.rev=rv;else if(s.revOn)alert('أيام المراجعة غير صحيحة، تم الإبقاء على القيم السابقة');
+  replan()},
  preset(a){S.set.focus=a[0];S.set.short=a[1];save();render()},
- exp(){S.lastExport=Date.now();save();$('#bk').value=JSON.stringify({app:'medtrack',v:1,data:S},null,1);$('#bk').select()},
+ // quiz
+ qstart(){const ids=studiedToday(),qs=pickQ(S,ids);Q={ids:qs.map(q=>q.id),res:null,studied:ids.size};render()},
+ qsub(){const rows=[];for(let i=0;i<Q.ids.length;i++){const c=document.querySelector('input[name=q'+i+']:checked');if(!c)return alert('أجب عن كل الأسئلة أولا');rows.push(+c.value)}
+  const t=today();Q.res=Q.ids.map((id,i)=>{const q=S.questions.find(x=>x.id===id),ok=rows[i]===q.answer;
+   S.attempts.push({id:uid(),questionId:id,attemptDate:t,userAnswer:rows[i],isCorrect:ok});return{id,ans:rows[i],ok}});save();render()},
+ qend(){Q=null;render()},
+ qpost(){S.qpost=today();save();Q=null;V='today';render();alert('تم تأجيل الاختبار. يمكنك بدؤه من تبويب الاختبار في أي وقت.')},
+ addQ(){const tid=$('#qt').value,ty=$('#qy').value,tx=$('#qx').value.trim(),ex=$('#qe').value.trim(),an=parseInt($('#qa').value);
+  if(!tid||!tx)return alert('اختر الموضوع واكتب نص السؤال');let opts,ans;
+  if(ty==='mcq'){opts=$('#qo').value.split('\n').map(x=>x.trim()).filter(Boolean);if(opts.length<2||opts.length>8)return alert('اكتب من 2 إلى 8 خيارات، كل خيار في سطر');
+   if(!(an>=1&&an<=opts.length))return alert('رقم الإجابة الصحيحة يجب أن يكون بين 1 و '+opts.length);ans=an-1}
+  else{if(an!==1&&an!==2)return alert('في سؤال صح/خطأ اكتب 1 إذا الإجابة صح أو 2 إذا خطأ');opts=['صح','خطأ'];ans=an-1}
+  if(S.questions.some(q=>!q.del&&q.topicId===tid&&nz(q.text)===nz(tx)))return alert('هذا السؤال موجود بالفعل في هذا الموضوع');
+  S.questions.push({id:uid(),topicId:tid,type:ty,text:tx,options:opts,answer:ans,explanation:ex,createdAt:Date.now()});save();render()},
+ delQ(i){if(confirm('حذف السؤال؟ تبقى نتائج المحاولات السابقة.')){S.questions.find(q=>q.id===i).del=true;save();render()}},
+ qprev(){QJ=$('#qj').value;let raw;try{raw=JSON.parse(QJ)}catch(e){QP={ok:[],errs:['النص ليس JSON صالحا: '+e.message],dup:0};return render()}
+  QP=validateQ(raw,S.topics,S.questions);render()},
+ qimp(){if(!QP||!QP.ok.length)return;S.questions.push(...QP.ok);const n=QP.ok.length;QP=null;QJ='';save();render();alert('تم استيراد '+n+' سؤال')},
+ // backup
+ exp(){S.lastExport=Date.now();save();const txt=JSON.stringify({app:'medtrack',v:2,data:S},null,1);$('#bk').value=txt;
+  try{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download='medtrack-backup-'+today()+'.json';document.body.appendChild(a);a.click();a.remove()}catch(e){}},
  imp(){let o;try{o=JSON.parse($('#bk').value)}catch(e){return alert('النص ليس نسخة احتياطية صالحة (JSON)')}
-  if(!o||o.app!=='medtrack'||o.v!==1||!o.data)return alert('ملف غير مدعوم أو نسخته غير معروفة');
-  const d=o.data;for(const k of['subjects','exams','topics','tasks','sessions'])if(!Array.isArray(d[k]))return alert('بيانات ناقصة: '+k);
-  for(const k of['subjects','exams','topics','tasks','sessions']){const ids=d[k].map(x=>x.id);if(new Set(ids).size!==ids.length)return alert('معرّفات مكررة في: '+k)}
-  if(!confirm('سيتم استبدال كل بياناتك الحالية بالنسخة الاحتياطية. سيُحفظ نسخة من بياناتك الحالية تلقائيا قبل ذلك. متابعة؟'))return;
-  put('prev',S).then(()=>{S={...fresh(),...d,set:{...fresh().set,...d.set},timer:null};replan()})},
- undo(){get('prev').then(p=>{if(!p)return alert('لا توجد نسخة سابقة');if(confirm('الرجوع إلى البيانات قبل آخر استعادة؟')){S=p;replan()}})}
+  if(!o||o.app!=='medtrack'||![1,2].includes(o.v)||!o.data)return alert('ملف غير مدعوم أو نسخته غير معروفة');
+  const d=o.data,K=['subjects','exams','topics','tasks','sessions'];for(const k of K)if(!Array.isArray(d[k]))return alert('بيانات ناقصة: '+k);
+  for(const k of[...K,'books','questions','attempts']){if(d[k]===undefined)continue;if(!Array.isArray(d[k]))return alert('بيانات غير صالحة: '+k);const ids=d[k].map(x=>x.id);if(new Set(ids).size!==ids.length)return alert('معرّفات مكررة في: '+k)}
+  const sids=new Set(d.subjects.map(x=>x.id));if(d.topics.some(x=>!sids.has(x.subjectId))||d.exams.some(x=>!sids.has(x.subjectId)))return alert('النسخة تالفة: مواضيع أو امتحانات مرتبطة بمادة غير موجودة');
+  if(!confirm('سيتم استبدال كل بياناتك الحالية بالنسخة الاحتياطية. سيُحفظ نسخة من بياناتك الحالية تلقائيا قبل ذلك (ويمكنك التراجع). متابعة؟'))return;
+  put('prev',S).then(()=>{S=mig({...fresh(),...d,timer:null});replan()})},
+ undo(){get('prev').then(p=>{if(!p)return alert('لا توجد نسخة سابقة');if(confirm('الرجوع إلى البيانات قبل آخر استعادة؟')){S=mig(p);replan()}})}
 };
 document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');if(b)A[b.dataset.a](b.dataset.id||undefined)});
+document.addEventListener('change',e=>{if(e.target.id==='bf'){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{$('#bk').value=r.result};r.readAsText(f)}});
 // ---- views ----
 const opts=l=>l.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');
+const topOpts=()=>S.topics.map(x=>`<option value="${x.id}">${esc(sb(x.subjectId)?.name)} - ${esc(x.name)}</option>`).join('');
+function vProg(){return`<div class="c"><h2>التقدم</h2>${S.subjects.map(s=>{const ts=S.topics.filter(x=>x.subjectId===s.id&&!x.ex),tot=ts.reduce((a,x)=>a+x.pages,0),dn=ts.reduce((a,x)=>a+x.done,0),p=tot?Math.round(100*dn/tot):0;
+ return`<div class="t"><div class="r"><b style="flex:1">${esc(s.name)}</b><span class="mu">${dn} / ${tot} صفحة (${p}%)</span></div><div class="bar"><i style="width:${p}%"></i></div></div>`}).join('')||'<div class="mu">لا توجد مواد بعد</div>'}</div>`}
+function vLastQuiz(){if(!S.attempts.length)return'';const d=S.attempts.reduce((m,a)=>a.attemptDate>m?a.attemptDate:m,''),l=S.attempts.filter(a=>a.attemptDate===d);
+ return`<div class="mu">آخر اختبار: ${l.filter(a=>a.isCorrect).length} من ${l.length} بتاريخ ${D(d)}</div>`}
 function vToday(){
  const t=today(),ex=S.exams.filter(e=>e.date>=t).sort((a,b)=>a.date<b.date?-1:1)[0];
- const todo=S.tasks.filter(x=>x.status!=='done'&&x.date<=t).sort((a,b)=>a.date<b.date?-1:a.id<b.id?-1:1);
- const dn=S.tasks.filter(x=>x.status==='done'&&x.doneDate===t);
+ const todo=S.tasks.filter(x=>x.status!=='done'&&x.date<=t).sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:a.topicId<b.topicId?-1:a.topicId>b.topicId?1:a.p1-b.p1);
+ const dn=S.tasks.filter(x=>x.status==='done'&&x.doneDate===t),late=todo.filter(x=>x.date<t).length;
  const pm=todo.reduce((a,x)=>a+x.min,0),dm=dn.reduce((a,x)=>a+(x.actualMinutes||x.min),0);
- const row=(k,d)=>{const p=tp(k.topicId);return`<div class="t"><b>${esc(p?sb(p.subjectId)?.name:'')}</b> - ${esc(p?.name||'موضوع محذوف')}
-  <div class="mu">صفحات ${k.p1}-${k.p2} · ${k.min} دقيقة · دراسة · ${d?'منجزة ('+k.donePages+' صفحة)':k.date<t?'<span class=bad>متأخرة</span>':'اليوم'}${k.pinned?' · <span class=pill>مثبتة</span>':''}</div>
+ const row=(k,d)=>{const p=tp(k.topicId),o=p?p.off||0:0;return`<div class="t"><b>${esc(p?sb(p.subjectId)?.name:'')}</b> - ${esc(p?.name||'موضوع محذوف')}
+  <div class="mu">${k.type==='rev'?'مراجعة كاملة للموضوع':'صفحات '+(k.p1+o)+'-'+(k.p2+o)} · ${k.min} دقيقة · ${k.type==='rev'?'مراجعة':'دراسة'} · ${d?'منجزة'+(k.type==='rev'?'':' ('+k.donePages+' صفحة)'):k.date<t?'<span class=bad>متأخرة</span>':'اليوم'}${k.pinned?' · <span class=pill>مثبتة</span>':''}</div>
   ${d?'':`<div class="r"><button class="b" data-a="start" data-id="${k.id}">ابدأ</button><button class="b g" data-a="done" data-id="${k.id}">أنجزت</button><button class="b g" data-a="post" data-id="${k.id}">تأجيل</button><button class="b g" data-a="pin" data-id="${k.id}">${k.pinned?'إلغاء التثبيت':'تثبيت'}</button></div>`}</div>`};
- return`<div class="c"><h2>اليوم ${t}</h2>
+ const qs=studiedToday(),qAvail=!S.attempts.some(a=>a.attemptDate===t)&&S.qpost!==t&&pickQ(S,qs).length>0;
+ return`<div class="c"><h2>اليوم ${D(t)}</h2>
   <div>${ex?`أقرب امتحان: <b>${esc(ex.name)}</b> بعد <b>${Math.round((new Date(ex.date)-new Date(t))/864e5)}</b> يوم`:'لا توجد امتحانات قادمة. أضف امتحانا من تبويب المواد.'}</div>
-  <div class="mu">المخطط اليوم: ${pm} دقيقة · المنجز: ${dm} دقيقة · المتبقي: ${todo.length} مهمة</div></div>
+  <div class="mu">المخطط اليوم: ${pm} دقيقة · المنجز: ${dm} دقيقة · المتبقي: ${todo.length} مهمة · المتأخر: ${late}</div>${vLastQuiz()}</div>
+ ${late?`<div class="c" style="border-color:var(--bad)"><b class="bad">لديك ${late} مهمة متأخرة</b><div class="mu">اضغط "أنا متأخر" لترى جدولا مقترحا، ولن يتغير شيء إلا بعد موافقتك.</div><div class="r" style="margin-top:8px"><button class="b" data-a="behind">أنا متأخر</button></div></div>`:''}
+ ${qAvail?`<div class="c"><b>اختبار نهاية اليوم جاهز</b><div class="r" style="margin-top:8px"><button class="b" data-a="tab" data-id="quiz">ابدأ الاختبار</button><button class="b g" data-a="qpost">تأجيل</button></div></div>`:''}
  ${vTimer()}${vDef()}
  <div class="c"><h2>مهام اليوم</h2>${todo.map(k=>row(k)).join('')||'<div class="mu">لا توجد مهام. أضف مواضيع وامتحانات ثم اضغط "أعد الجدولة".</div>'}
   ${dn.map(k=>row(k,1)).join('')}
-  <div class="r" style="margin-top:10px"><button class="b g" data-a="replan">أعد الجدولة</button></div></div>`}
+  <div class="r" style="margin-top:10px"><button class="b g" data-a="replan">أعد الجدولة</button></div></div>${vProg()}`}
 function vTimer(){const T=S.timer;
  if(!T)return`<div class="c r"><button class="b g" data-a="brk">ابدأ استراحة</button><span class="mu">جلسات مكتملة: ${S.cnt}</span></div>`;
  const k=T.taskId&&tk(T.taskId),p=k&&tp(k.topicId);
  return`<div class="c"><h2>${T.mode==='focus'?'تركيز: '+esc(p?.name||''):'استراحة'}</h2>
- <div class="big" id="rem"></div><div class="mu" style="text-align:center">المنقضي <span id="el"></span>${T.ps?' · متوقف مؤقتا':''}</div>
+ <div class="big" id="rem"></div><div class="mu" style="text-align:center">المنقضي <span id="el"></span>${T.ps?' · متوقف مؤقتا':''}</div><div class="ok" style="text-align:center" id="msg"></div>
  <div class="r" style="justify-content:center;margin-top:8px">${T.ps?'<button class="b" data-a="resume">استئناف</button>':'<button class="b" data-a="pause">إيقاف مؤقت</button>'}<button class="b g" data-a="finish">${T.mode==='focus'?'إنهاء الجلسة':'إنهاء الاستراحة'}</button></div></div>`}
-function vDef(){const d=S.def;if(!d)return'';
+function vDef(d=S.def){if(!d)return'';
+ const rv=d.rev&&d.rev.length?`<div class="c" style="border-color:var(--bad)"><b class="bad">مراجعات لا تتسع في الجدول</b>${d.rev.map(x=>`<div class="t">${esc(x.topic)}: مراجعة اليوم ${x.n} لم تجد وقتا قبل الامتحان</div>`).join('')}<div class="mu">لم يُحذف شيء. زد وقت المذاكرة أو غيّر أيام المراجعة من الإعدادات.</div></div>`:'';
  if(d.list.length)return`<div class="c" style="border-color:var(--bad)"><h2 class="bad">الوقت لا يكفي</h2>
   <div>المطلوب: ${d.req} دقيقة · المتاح: ${d.avail} دقيقة · العجز: <b>${d.lack}</b> دقيقة (${(d.lack/60).toFixed(1)} ساعة)</div>
   ${d.list.map(x=>`<div class="t">${esc(x.topic)}: ${x.pages} صفحة لا تتسع${x.exam?' قبل '+esc(x.exam):''}</div>`).join('')}
-  <div class="mu">الحلول: زد دقائق الأيام، أو أعد النظر في الأولويات، أو استبعد مواضيع بنفسك. لم يُحذف أي شيء تلقائيا.</div></div>`;
- return d.req?`<div class="c"><span class="pill">الجدول ممكن</span> <span class="mu">المطلوب ${d.req} دقيقة من ${d.avail} متاحة</span></div>`:''}
+  <div class="mu">الحلول: زد دقائق الأيام، أو أعد النظر في الأولويات، أو قلل المراجعة، أو استبعد مواضيع بنفسك. لم يُحذف أي شيء تلقائيا.</div></div>`+rv;
+ return(d.req?`<div class="c"><span class="pill">الجدول ممكن</span> <span class="mu">المطلوب ${d.req} دقيقة من ${d.avail} متاحة</span></div>`:'')+rv}
+function vProp(){const p=P,d=p.d;
+ return`<div class="c"><h2>${esc(p.title)}</h2><div class="mu">هذا اقتراح فقط. لن يتغير جدولك إلا إذا وافقت. المهام المنجزة وسجل الجلسات لا يتغيران أبدا، والمهام المثبتة تبقى في مكانها.</div></div>
+ ${vDef(p.r.def)}
+ <div class="c"><h3>المهام التي ستتغير (${d.rows.length})</h3>${d.rows.slice(0,40).map(x=>{const pt=tp(x.k.topicId),o=pt?pt.off||0:0;return`<div class="t"><b>${esc(pt?.name||'')}</b> · صفحات ${x.k.p1+o}-${x.k.p2+o}<div class="mu">كانت: ${D(x.k.date)} · ${x.bad?'<span class=bad>'+x.txt+'</span>':x.txt}</div><div class="mu">السبب: ${esc(x.why)}</div></div>`}).join('')||'<div class="mu">لن تتغير أي مهمة.</div>'}
+  ${d.rows.length>40?'<div class="mu">… و '+(d.rows.length-40)+' مهمة أخرى</div>':''}${d.fresh?`<div class="mu">مهام جديدة ستُضاف: ${d.fresh}</div>`:''}
+  <div class="r" style="margin-top:10px"><button class="b" data-a="applyP">موافق، طبّق التغييرات</button><button class="b g" data-a="cancelP">إلغاء</button></div></div>`}
 function vSub(){
+ const bks=S.books.filter(b=>!b.del);
  return`<div class="c"><h2>مادة جديدة</h2><div class="r"><input id="sn" placeholder="اسم المادة"><select id="sp"><option value="3">أولوية عالية</option><option value="2" selected>متوسطة</option><option value="1">منخفضة</option></select><button class="b" data-a="addSub">إضافة</button></div></div>
  <div class="c"><h2>امتحان جديد</h2><div class="r"><input id="en" placeholder="اسم الامتحان"><select id="es">${opts(S.subjects)}</select><input id="ed" type="date"><button class="b" data-a="addExam">إضافة</button></div>
-  ${S.exams.slice().sort((a,b)=>a.date<b.date?-1:1).map(e=>`<div class="t r">${esc(e.name)} · ${esc(sb(e.subjectId)?.name)} · ${e.date}<button class="b x" data-a="delExam" data-id="${e.id}">حذف</button></div>`).join('')}</div>
- <div class="c"><h2>موضوع جديد (بالصفحات)</h2><div class="r"><input id="tn" placeholder="اسم الموضوع"><select id="ts">${opts(S.subjects)}</select><input id="tp" type="number" min="1" placeholder="صفحات"><select id="td"><option value="e">سهل</option><option value="m" selected>متوسط</option><option value="h">صعب</option></select><button class="b" data-a="addTopic">إضافة</button></div></div>
+  ${S.exams.slice().sort((a,b)=>a.date<b.date?-1:1).map(e=>`<div class="t r"><span style="flex:1">${esc(e.name)} · ${esc(sb(e.subjectId)?.name)} · ${D(e.date)}</span><button class="b g" data-a="editExam" data-id="${e.id}">تعديل التاريخ</button><button class="b x" data-a="delExam" data-id="${e.id}">حذف</button></div>`).join('')}</div>
+ <div class="c"><h2>كتاب جديد (اختياري)</h2><div class="mu">اكتب اسم الكتاب وعدد صفحاته لتحدد صفحات كل موضوع منه. ملف الـ PDF نفسه لا يُحفظ في التطبيق.</div>
+  <div class="r"><input id="bn" placeholder="اسم الكتاب"><select id="bs">${opts(S.subjects)}</select><input id="bp" type="number" min="1" placeholder="عدد الصفحات"><button class="b" data-a="addBook">إضافة</button></div>
+  ${bks.map(b=>`<div class="t r"><span style="flex:1">${esc(b.title)} · ${esc(sb(b.subjectId)?.name)} · ${b.pages} صفحة</span><button class="b x" data-a="delBook" data-id="${b.id}">حذف</button></div>`).join('')}</div>
+ <div class="c"><h2>موضوع جديد (بالصفحات)</h2><div class="r"><input id="tn" placeholder="اسم الموضوع"><select id="ts">${opts(S.subjects)}</select><input id="tp" type="number" min="1" placeholder="صفحات"><select id="td"><option value="e">سهل</option><option value="m" selected>متوسط</option><option value="h">صعب</option></select></div>
+  <div class="r mu" style="margin-top:8px">أو من كتاب: <select id="tb"><option value="">بدون كتاب</option>${bks.map(b=>`<option value="${b.id}">${esc(b.title)} (${b.pages})</option>`).join('')}</select> من صفحة <input id="t1" type="number" min="1"> إلى <input id="t2" type="number" min="1"></div>
+  <div class="r" style="margin-top:8px"><button class="b" data-a="addTopic">إضافة الموضوع</button></div></div>
  ${S.subjects.map(s=>`<div class="c"><div class="r"><h2 style="margin:0;flex:1">${esc(s.name)}</h2><button class="b x" data-a="delSub" data-id="${s.id}">حذف المادة</button></div>
-  ${S.topics.filter(x=>x.subjectId===s.id).map(x=>`<div class="t">${esc(x.name)} <span class="pill">${DIFF[x.diff][0]}</span><div class="mu">${x.done} / ${x.pages} صفحة (${Math.round(100*x.done/x.pages)}%)</div><div class="r"><button class="b g" data-a="setPages" data-id="${x.id}">تعديل المنجز</button><button class="b x" data-a="delTopic" data-id="${x.id}">حذف</button></div></div>`).join('')||'<div class="mu">لا مواضيع بعد</div>'}</div>`).join('')}`}
-function vSet(){const s=S.set,n=(id,v,l)=>`<label class="r">${l} <input id="${id}" type="number" step="any" value="${v}"></label>`;
+  ${S.topics.filter(x=>x.subjectId===s.id).map(x=>{const bk=x.bookId&&S.books.find(b=>b.id===x.bookId);return`<div class="t">${esc(x.name)} <span class="pill">${DIFF[x.diff][0]}</span>${x.ex?' <span class="pill bad">مستبعد</span>':''}${x.done>=x.pages?' <span class="pill">مكتمل</span>':''}<div class="mu">${bk?esc(bk.title)+' ص '+(x.off+1)+'-'+(x.off+x.pages)+' · ':''}${x.done} / ${x.pages} صفحة (${Math.round(100*x.done/x.pages)}%)</div><div class="bar"><i style="width:${Math.round(100*x.done/x.pages)}%"></i></div><div class="r" style="margin-top:6px"><button class="b g" data-a="setPages" data-id="${x.id}">تعديل المنجز</button><button class="b g" data-a="excl" data-id="${x.id}">${x.ex?'إعادة للجدول':'استبعاد'}</button><button class="b x" data-a="delTopic" data-id="${x.id}">حذف</button></div></div>`}).join('')||'<div class="mu">لا مواضيع بعد</div>'}</div>`).join('')}`}
+function vQuiz(){
+ let top='';
+ if(Q&&Q.res){const n=Q.res.filter(r=>r.ok).length;
+  top=`<div class="c"><h2>النتيجة: ${n} من ${Q.res.length}</h2>${Q.res.map((r,i)=>{const q=S.questions.find(x=>x.id===r.id);
+   return`<div class="t"><b>${i+1}. ${esc(q.text)}</b><div class="${r.ok?'ok':'bad'}">${r.ok?'إجابتك صحيحة':'إجابتك خاطئة: '+esc(q.options[r.ans])}</div><div>الإجابة الصحيحة: <b>${esc(q.options[q.answer])}</b></div>${q.explanation?`<div class="mu">${esc(q.explanation)}</div>`:''}</div>`}).join('')}
+   <div class="mu">الأسئلة من إدخالك أنت، وتحتاج إلى مراجعتك لصحتها العلمية.</div><div class="r" style="margin-top:8px"><button class="b" data-a="qend">تم</button></div></div>`}
+ else if(Q){if(!Q.ids.length)top=`<div class="c"><h2>اختبار نهاية اليوم</h2><div>${Q.studied?'لا توجد أسئلة محفوظة للمواضيع التي ذاكرتها اليوم. أضف أسئلة من الأسفل.':'لم تنجز أي مهمة اليوم بعد، لذلك لا توجد مواضيع للاختبار.'}</div><div class="r" style="margin-top:8px"><button class="b g" data-a="qend">رجوع</button></div></div>`;
+  else top=`<div class="c"><h2>اختبار نهاية اليوم</h2>${Q.ids.length<5?`<div class="mu">يوجد ${Q.ids.length} أسئلة فقط للمواضيع التي ذاكرتها اليوم. أضف المزيد لبنك الأسئلة.</div>`:''}
+   ${Q.ids.map((id,i)=>{const q=S.questions.find(x=>x.id===id);return`<div class="t"><b>${i+1}. ${esc(q.text)}</b>${q.options.map((o,j)=>`<label class="opt"><input type="radio" name="q${i}" value="${j}"> ${esc(o)}</label>`).join('')}</div>`}).join('')}
+   <div class="r" style="margin-top:8px"><button class="b" data-a="qsub">تسليم</button><button class="b g" data-a="qend">إلغاء</button></div></div>`}
+ else top=`<div class="c"><h2>اختبار نهاية اليوم</h2><div class="mu">حتى 5 أسئلة من المواضيع التي أنجزتها اليوم.</div><div class="r" style="margin-top:8px"><button class="b" data-a="qstart">ابدأ الاختبار</button></div>${vLastQuiz()}</div>`;
+ const live=S.questions.filter(q=>!q.del);
+ return top+`<div class="c"><h2>إضافة سؤال يدويا</h2>
+  <div class="r"><select id="qt">${topOpts()}</select><select id="qy"><option value="mcq">اختيار من متعدد</option><option value="tf">صح / خطأ</option></select></div>
+  <textarea id="qx" placeholder="نص السؤال" style="margin-top:8px"></textarea>
+  <textarea id="qo" placeholder="الخيارات (لسؤال الاختيار من متعدد): كل خيار في سطر" style="margin-top:8px"></textarea>
+  <div class="r" style="margin-top:8px"><label class="r">رقم الإجابة الصحيحة <input id="qa" type="number" min="1"></label><span class="mu">(في صح/خطأ: 1 = صح، 2 = خطأ)</span></div>
+  <input id="qe" placeholder="شرح الإجابة (اختياري)" style="width:100%;margin-top:8px"><div class="r" style="margin-top:8px"><button class="b" data-a="addQ">حفظ السؤال</button></div></div>
+ <div class="c"><h2>استيراد أسئلة (JSON)</h2><div class="mu">اطلب من Claude أن يجهز لك الأسئلة بهذا الشكل بالضبط، واستخدم نفس أسماء مواضيعك. رقم الإجابة يبدأ من 0 (0 = الخيار الأول). وفي صح/خطأ اكتب true أو false.</div>
+  <pre>[
+ {"topic":"TOPIC NAME","type":"mcq","question":"Question?",
+  "options":["A","B","C","D"],"answer":1,"explanation":"Short explanation"},
+ {"topic":"TOPIC NAME","type":"tf","question":"Statement?","answer":true}
+]</pre>
+  <textarea id="qj" dir="ltr" placeholder="الصق الأسئلة هنا">${esc(QJ)}</textarea><div class="r" style="margin-top:8px"><button class="b g" data-a="qprev">معاينة وفحص</button></div>
+  ${QP?`<div class="t"><b>${QP.ok.length} سؤال صالح${QP.dup?' · '+QP.dup+' مكرر سيُتجاهل':''}${QP.errs.length?' · <span class=bad>'+QP.errs.length+' فيه خطأ</span>':''}</b>${QP.errs.slice(0,30).map(e=>`<div class="bad mu">${esc(e)}</div>`).join('')}${QP.ok.length?`<div class="r" style="margin-top:8px"><button class="b" data-a="qimp">استيراد الأسئلة الصالحة (${QP.ok.length})</button></div>`:''}${QP.errs.length?'<div class="mu">الأسئلة الخاطئة لن تُستورد. صحّحها ثم اضغط معاينة من جديد.</div>':''}</div>`:''}</div>
+ <div class="c"><h2>بنك الأسئلة (${live.length})</h2><div class="mu">الأسئلة مواد دراسية من إدخالك، وأنت المسؤول عن مراجعة صحتها.</div>
+  ${S.topics.map(x=>({x,l:live.filter(q=>q.topicId===x.id)})).filter(o=>o.l.length).map(o=>`<details class="t"><summary>${esc(sb(o.x.subjectId)?.name)} - ${esc(o.x.name)} (${o.l.length})</summary>${o.l.map(q=>`<div class="t r"><span style="flex:1">${esc(q.text)}</span><button class="b x" data-a="delQ" data-id="${q.id}">حذف</button></div>`).join('')}</details>`).join('')||'<div class="mu">لا توجد أسئلة بعد</div>'}</div>`}
+function vSet(){const s=S.set,n=(id,v,l)=>`<label class="r">${l} <input id="${id}" type="number" step="any" value="${v}"></label>`,ck=(id,v,l)=>`<label class="r"><input type="checkbox" id="${id}" ${v?'checked':''}> ${l}</label>`;
  const old=!S.lastExport||Date.now()-S.lastExport>7*864e5;
  return`<div class="c"><h2>وقت المذاكرة المتاح (دقائق لكل يوم)</h2><div class="mu">ضع 0 ليوم الراحة</div>${DAYS.map((d,i)=>n('w'+i,s.mins[i],d)).join('')}
  ${n('mpp',s.mpp,'دقائق لكل صفحة')}${n('mt',s.maxTask,'أقصى مدة للمهمة (دقيقة)')}</div>
- <div class="c"><h2>بومودورو</h2> <div class="r"><button class="b g" onclick="A.preset([25,5])">25/5</button><button class="b g" onclick="A.preset([45,10])">45/10</button><button class="b g" onclick="A.preset([60,15])">60/15</button></div>
+ <div class="c"><h2>بومودورو</h2>
+ <div class="r"><button class="b g" onclick="A.preset([25,5])">25/5</button><button class="b g" onclick="A.preset([45,10])">45/10</button><button class="b g" onclick="A.preset([60,15])">60/15</button></div>
  ${n('fo',s.focus,'مدة التركيز')}${n('sh',s.short,'استراحة قصيرة')}${n('lo',s.long,'استراحة طويلة')}${n('ev',s.every,'جلسات قبل الطويلة')}
+ ${ck('au',s.auto,'بدء الاستراحة تلقائيا بعد إنهاء الجلسة')}${ck('so',s.sound,'صوت وتنبيه عند انتهاء الوقت (قد لا يعمل إذا كانت الشاشة مقفلة)')}</div>
+ <div class="c"><h2>المراجعة التلقائية</h2><div class="mu">بعد إكمال موضوع تُضاف مراجعات كاملة له بعد هذا العدد من الأيام (مفصولة بفواصل)</div>
+ ${ck('ro',s.revOn,'تفعيل المراجعة التلقائية')}<label class="r">الأيام <input id="rv" dir="ltr" style="width:180px" value="${s.rev.join(',')}"></label>
  <div class="r" style="margin-top:8px"><button class="b" data-a="saveSet">حفظ الإعدادات وإعادة الجدولة</button></div></div>
  <div class="c"><h2>النسخ الاحتياطي</h2>${old?'<div class="bad">لم تأخذ نسخة احتياطية منذ أكثر من أسبوع.</div>':''}
- <div class="mu">اضغط "تصدير" ثم انسخ النص كله واحفظه في ملاحظات أو أرسله لنفسك. للاستعادة الصق النص هنا واضغط "استعادة".</div>
- <textarea id="bk" dir="ltr"></textarea><div class="r"><button class="b" data-a="exp">تصدير</button><button class="b g" data-a="imp">استعادة</button><button class="b g" data-a="undo">تراجع عن آخر استعادة</button></div></div>`}
+ <div class="mu">"تصدير" ينزّل ملفا ويعرض النص أيضا. للاستعادة اختر الملف أو الصق النص ثم اضغط "استعادة". النسخة لا تتضمن ملفات PDF.</div>
+ <div class="r"><button class="b" data-a="exp">تصدير</button><label class="b g" style="display:inline-flex;align-items:center">اختيار ملف<input type="file" id="bf" accept=".json,application/json" hidden></label><button class="b g" data-a="imp">استعادة</button><button class="b g" data-a="undo">تراجع عن آخر استعادة</button></div>
+ <textarea id="bk" dir="ltr" style="margin-top:8px"></textarea></div>`}
 function render(){
- $('#nav').innerHTML=[['today','اليوم'],['sub','المواد والامتحانات'],['set','الإعدادات']].map(([k,l])=>`<button class="${V===k?'on':''}" data-a="tab" data-id="${k}">${l}</button>`).join('');
- $('#m').innerHTML=(warn?`<div class="c bad">${warn}</div>`:'')+(V==='today'?vToday():V==='sub'?vSub():vSet());tick()}
-function tick(){const T=S&&S.timer;if(!T||!$('#rem'))return;const e=elapsed(T);$('#rem').textContent=fmt(T.dur-e);$('#el').textContent=fmt(e)}
+ $('#nav').innerHTML=[['today','اليوم'],['sub','المواد والامتحانات'],['quiz','الاختبار'],['set','الإعدادات']].map(([k,l])=>`<button class="${V===k?'on':''}" data-a="tab" data-id="${k}">${l}</button>`).join('');
+ $('#m').innerHTML=(warn?`<div class="c bad">${warn}</div>`:'')+(V==='prop'&&P?vProp():V==='today'?vToday():V==='sub'?vSub():V==='quiz'?vQuiz():vSet());tick()}
+function tick(){const T=S&&S.timer;if(!T||!$('#rem'))return;const e=elapsed(T),r=T.dur-e;$('#rem').textContent=fmt(r);$('#el').textContent=fmt(e);
+ const m=$('#msg');if(m)m.textContent=r<=0?(T.mode==='focus'?'انتهى وقت التركيز. اضغط إنهاء الجلسة وسجّل ما أنجزته.':'انتهت الاستراحة.'):'';
+ if(r<=0&&!T.al&&!T.ps){T.al=1;save();beep()}}
 setInterval(tick,1000);document.addEventListener('visibilitychange',tick);
 (async()=>{try{S=await get('state')}catch(e){warn='التخزين غير متاح، ستضيع البيانات عند الإغلاق'}
- S=S||fresh();try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}replan()})();
+ S=S?mig(S):fresh();try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}replan()})();
 if('serviceWorker' in navigator)addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 </script></body></html>

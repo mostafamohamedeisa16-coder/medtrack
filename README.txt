@@ -1,12 +1,7 @@
-MedTrack - how to run
-=====================
-Easiest (no install, works offline + installable): Netlify Drop
-1. Open https://app.netlify.com/drop  (free account)
-2. Drag this whole "medtrack" folder onto the page.
-3. You get an https link. Open it in Chrome/Edge, then click the install icon in the address bar.
-4. On the phone: open the same link in Chrome > menu > "Add to Home screen".
+MedTrack - how to run / update
+==============================
+Update an existing GitHub Pages site: open your repository > Add file > Upload files >
+drop index.html and sw.js (they replace the old ones) > Commit changes. Wait 1-3 minutes,
+then open the app and refresh twice. Your study data stays on your device.
 
-Local only (needs Python): open a terminal in this folder and run
-   python -m http.server 8000
-then open http://localhost:8000
-(Do NOT double-click index.html: offline mode needs a server.)
+First time: see the steps in the chat (GitHub Pages or python -m http.server 8000).
